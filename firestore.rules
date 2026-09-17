@@ -1,0 +1,117 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Common authorization helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function getUserRole() {
+      return request.auth.token.role;
+    }
+
+    function getInstitutionId() {
+      return request.auth.token.institutionId;
+    }
+
+    function isSameInstitution(instId) {
+      return isAuthenticated() && getInstitutionId() == instId;
+    }
+
+    function isStudent() {
+      return isAuthenticated() && getUserRole() == 'student';
+    }
+
+    function isTeacher() {
+      return isAuthenticated() && getUserRole() == 'teacher';
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && getUserRole() == 'admin';
+    }
+
+    // 1. Institutions Roster & Classes
+    match /institutions/{institutionId} {
+      allow read: if isSameInstitution(institutionId);
+      allow write: if isAdmin() && isSameInstitution(institutionId);
+
+      match /classes/{classId} {
+        allow read: if isSameInstitution(institutionId);
+        allow write: if isAdmin() && isSameInstitution(institutionId);
+      }
+    }
+
+    // 2. User Profiles
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin() || isTeacher());
+      allow create, delete: if false; // Privileged Cloud Functions only
+      allow update: if isAuthenticated() && (
+        (request.auth.uid == userId && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'institutionId', 'status']))
+        || isAdmin()
+      );
+    }
+
+    // 3. Courses & Lessons: Staff & Students only (Admins have STRICT ZERO academic access)
+    match /courses/{courseId} {
+      allow read: if isAuthenticated() && !isAdmin() && isSameInstitution(resource.data.institutionId);
+      allow write: if isTeacher() && isSameInstitution(request.resource.data.institutionId);
+    }
+
+    match /lessons/{lessonId} {
+      allow read: if isAuthenticated() && !isAdmin() && isSameInstitution(resource.data.institutionId);
+      allow write: if isTeacher() && isSameInstitution(request.resource.data.institutionId);
+    }
+
+    // 4. Quizzes & Attempts: Students & Teachers only (Admins have STRICT ZERO access)
+    match /quizzes/{quizId} {
+      allow read: if isAuthenticated() && !isAdmin() && isSameInstitution(resource.data.institutionId);
+      allow write: if isTeacher() && isSameInstitution(request.resource.data.institutionId);
+    }
+
+    match /quiz_attempts/{attemptId} {
+      allow read: if isAuthenticated() && (
+        (isStudent() && resource.data.studentId == request.auth.uid) ||
+        isTeacher()
+      );
+      allow create: if isStudent() && request.resource.data.studentId == request.auth.uid;
+      allow update, delete: if false; // Immutable attempt log
+    }
+
+    // 5. Assignments & Submissions: Teachers & Students only (Admins have STRICT ZERO access)
+    match /assignments/{assignmentId} {
+      allow read: if isAuthenticated() && !isAdmin() && isSameInstitution(resource.data.institutionId);
+      allow write: if isTeacher() && isSameInstitution(request.resource.data.institutionId);
+    }
+
+    match /submissions/{submissionId} {
+      allow read: if isAuthenticated() && (
+        (isStudent() && resource.data.studentId == request.auth.uid) ||
+        isTeacher()
+      );
+      allow create: if isStudent() && request.resource.data.studentId == request.auth.uid;
+      allow update: if isTeacher() || (isStudent() && resource.data.studentId == request.auth.uid && resource.data.status == 'draft');
+    }
+
+    // 6. Attendance Records: Teachers mark, Students read own, Admin reads summary
+    match /attendance/{recordId} {
+      allow read: if isAuthenticated() && isSameInstitution(resource.data.institutionId);
+      allow write: if isTeacher() && isSameInstitution(request.resource.data.institutionId);
+    }
+
+    // 7. Progress Records
+    match /progress/{progressId} {
+      allow read: if isAuthenticated() && (
+        (isStudent() && resource.data.studentId == request.auth.uid) ||
+        isTeacher()
+      );
+      allow write: if isStudent() && request.resource.data.studentId == request.auth.uid;
+    }
+
+    // 8. Fees & Finance: Admin Only (Teachers have STRICT ZERO ACCESS)
+    match /fees/{feeId} {
+      allow read: if isAdmin() || (isStudent() && resource.data.studentId == request.auth.uid);
+      allow write: if isAdmin();
+    }
+  }
+}
